@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>WebGL</title>
+    </head>
+    <body onload="start()" style="background-color:rgb(64,64,64);">
+        <canvas id="gl-canvas" width="640" height="480">
+            Your browser doesn't appear to support the HTML5 <code>&lt;canvas&gt;</code> element.
+        </canvas>
+    </body>
+
+    <script src="vec2.js"></script>
+    <script src="vec3.js"></script>
+    <script src="vec4.js"></script>
+    <script src="mat3.js"></script>
+    <script src="mat4.js"></script>
+    <script src="glu.js"></script>
+    <script src="assetmanager.js"></script>
+    <script src="scene.js"></script>
+    <script src="entity.js"></script>
+    <script src="events.js"></script>
+    <script src="input.js"></script>
+    <script src="render.js"></script>
+    <script src="render-uniforms.js"></script>
+    <script src="render-shaders.js"></script>
+    <script src="render-util.js"></script>
+    <script>
+
+/*
+
+TO DO:
+1. Add console.time( 'begin render' ) etc. tags to clarify about:tracing output
+2. Look at alternate PCF methods, maybe even VCF for better self-shadowing
+3. Normal mapping
+4. AABBs
+5. Non-visible mesh culling
+6. Physics/collisions
+7. 3rd person camera
+7. Combine SCENE and ENTITIES into one overall container for the simulation
+8. Further encapsulate rendering... pass it some data structure of geometry and lights
+   and let if do it's own thing
+
+*/
+
+
+
+        var GL = null,
+            SHADERS = {
+                depth: null,
+                pointLight: null,
+                spotLight: null,
+                DEBUG_depthGrayscale: null,
+                DEBUG_flatColor: null,
+            },
+
+            GLExtensions = { depthTexture: null },
+
+            GLProjectionMatrixStack = [],
+            GLViewMatrixStack = [],
+            GLModelMatrixStack = [],
+
+            GLProjectionMatrix = Mat4.create(),
+            GLViewMatrix = Mat4.create(),
+            GLModelMatrix = Mat4.create(),
+            GLNormalMatrix = Mat3.create(),
+
+            GLShadowProjectionMatrix = Mat4.create(),
+            GLShadowViewMatrix = Mat4.create(),
+            GLShadowModelMatrix = Mat4.create(),
+
+            GLVertexPositionAttribute = 0,
+            GLVertexNormalAttribute = 1,
+            GLTextureCoordAttribute = 2,
+
+            SHADER_PATH = 'shaders/',
+            ASSET_PATH = 'assets/',
+            Assets = new AssetManager(),
+            canvas = document.getElementById( 'gl-canvas' ),
+            horizontalAspectRatio = canvas.height / canvas.width,
+            GLViewportWidth = canvas.width,
+            GLViewportHeight = canvas.height,
+
+            GLVertexIndexBuffer = null,
+            GLVertexPositionBuffer = null,
+            GLTextureCoordBuffer = null,
+            GLMeshes = {},
+            GLMaterials = {},
+            GLTextures = {},
+
+            GLShadowMapFramebuffers = [],
+            GLShadowMapColorTextures = [],
+            GLShadowMapDepthTextures = [],
+            GLShadowMapWidth = 512,
+            GLShadowMapHeight = 512,
+
+            GLActiveMesh = null,
+            GLActiveMaterial = null,
+            GLActiveTexture = null,
+
+            LEFT_ARROW = 37,
+            UP_ARROW = 38,
+            RIGHT_ARROW = 39,
+            DOWN_ARROW = 40,
+            PLUS = 187,
+            MINUS = 189,
+            OPEN_BRACKET = 219,
+            CLOSE_BRACKET = 221,
+            SEMI_COLON = 186,
+            SINGLE_QUOTE = 222,
+
+            keysDown = {
+                LEFT_ARROW: false,
+                UP_ARROW: false,
+                RIGHT_ARROW: false,
+                DOWN_ARROW: false,
+                PLUS: false,
+                MINUS: false
+            },
+
+            PLAYER = null;
+
+            lastFrameTime = 0,
+            currentFrameTime = 0,
+
+            insetVertexPositions = null,
+            insetVertexNormals = null,
+            insetTextureCoords = null;
+
+
+
+        function initBuffers() {
+
+            'use strict';
+
+            var meshName,
+                meshData,
+                vertexIndexBuffer,
+                vertexPositionBuffer,
+                vertexNormalBuffer,
+                textureCoordBuffer;
+
+            for ( meshName in Assets.meshes ) {
+
+                if ( Assets.meshes.hasOwnProperty( meshName )
+                     && ! GLMeshes.hasOwnProperty( meshName ) ) {
+
+                    meshData = Assets.getMesh( meshName );
+
+                    vertexIndexBuffer = GL.createBuffer();
+                    GL.bindBuffer( GL.ELEMENT_ARRAY_BUFFER, vertexIndexBuffer );
+                    GL.bufferData( GL.ELEMENT_ARRAY_BUFFER,
+                                   new Uint16Array( meshData.vertexIndices ),
+                                   GL.STATIC_DRAW );
+
+                    vertexPositionBuffer = GL.createBuffer();
+                    GL.bindBuffer( GL.ARRAY_BUFFER, vertexPositionBuffer );
+                    GL.bufferData( GL.ARRAY_BUFFER,
+                                   new Float32Array( meshData.vertexPositions ),
+                                   GL.STATIC_DRAW );
+
+                    vertexNormalBuffer = GL.createBuffer();
+                    GL.bindBuffer( GL.ARRAY_BUFFER, vertexNormalBuffer );
+                    GL.bufferData( GL.ARRAY_BUFFER,
+                                   new Float32Array( meshData.vertexNormals ),
+                                   GL.STATIC_DRAW );
+
+                    textureCoordBuffer = GL.createBuffer();
+                    GL.bindBuffer( GL.ARRAY_BUFFER, textureCoordBuffer);
+                    GL.bufferData( GL.ARRAY_BUFFER,
+                                   new Float32Array( meshData.textureCoords ),
+                                   GL.STATIC_DRAW );
+
+                    GLMeshes[ meshName ] = {
+                    
+                        vertexIndexBuffer: vertexIndexBuffer,
+                        vertexIndexLength: meshData.vertexIndices.length,
+                        vertexPositionBuffer: vertexPositionBuffer,
+                        vertexPositionLength: meshData.vertexPositions.length,
+                        vertexNormalBuffer: vertexNormalBuffer,
+                        vertexNormalLength: meshData.vertexNormals.length,
+                        textureCoordBuffer: textureCoordBuffer,
+                        textureCoordLength: meshData.textureCoords.length
+
+                    };
+
+                }
+
+            }
+
+        };
+
+        function initMaterials() {
+
+            'use strict';
+
+            var materialName;
+
+            GLMaterials[ 'default.mtl' ] = {
+                ambientColor: [ 1.0, 1.0, 1.0 ],
+                diffuseColor: [ 0.0, 0.0, 0.0 ],
+                emissiveColor: [ 0, 0, 0 ],
+                specularColor: [ 0.0, 0.0, 0.0 ],
+                shininess: 1.0
+            };
+
+            for ( materialName in Assets.materials ) {
+
+                if ( Assets.materials.hasOwnProperty( materialName )
+                     && ! GLMaterials.hasOwnProperty( materialName ) ) {
+
+                    GLMaterials[ materialName ] = Assets.materials[ materialName ];
+
+                }
+
+            }
+
+        };
+
+        function initTextures() {
+
+            'use strict';
+
+            var textureName;
+
+            for ( textureName in Assets.textures ) {
+
+                if ( Assets.textures.hasOwnProperty( textureName )
+                     && ! GLTextures.hasOwnProperty( textureName ) ) {
+
+                    GLTextures[ textureName ] = GL.createTexture();
+                    GL.bindTexture( GL.TEXTURE_2D, GLTextures[ textureName ] );
+                    GL.pixelStorei( GL.UNPACK_FLIP_Y_WEBGL, true );
+                    GL.texParameteri( GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR );
+                    GL.texParameteri( GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR_MIPMAP_NEAREST );
+                    GL.texImage2D( GL.TEXTURE_2D, 0, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, Assets.getTexture( textureName ) );
+                    GL.generateMipmap( GL.TEXTURE_2D );
+                    GL.bindTexture( GL.TEXTURE_2D, null );
+
+                }
+
+            }
+
+        };
+
+
+        function initShadowMaps( scene ) {
+
+            var type,
+                shadowMap;
+
+            type = scene.lights.spot;
+
+            for ( i = 0; i < 16; i++ ) {
+
+                shadowMap = GLU.createShadowMap( GL, GLShadowMapWidth, GLShadowMapHeight );
+                type.colorTextures[ i ] = shadowMap.colorTexture;
+                type.depthTextures[ i ] = shadowMap.depthTexture;
+                type.framebuffers[ i ] = shadowMap.framebuffer;
+
+            }
+
+        };
+
+
+
+        function start() {
+
+            // Initialize the GL context
+            GL = GLU.init( 'gl-canvas' );
+
+            if ( ! GL ) {
+
+                console.log( 'Error initializing GL.' );
+
+            } else {
+
+                manifest = {
+                    shaders: [ 'depth.vs',
+                               'flat-color.vs',
+                               'default.vs',
+                               'depth.fs',
+                               'depth-grayscale.fs',
+                               'flat-color.fs',
+                               'point-light.fs',
+                               'spot-light.fs' ],
+                    models: {
+                        'monkey': {
+                            meshes: [ 'monkey.obj' ],
+                            materials: [ 'monkey.mtl' ],
+                            textures: [ 'default.png' ]
+                        },
+                        'cone': {
+                            meshes: [ 'cone.obj' ],
+                            materials: [ 'cone.mtl' ],
+                            textures: [ 'default.png' ]
+                        },
+                        'cube': {
+                            meshes: [ 'cube.obj' ],
+                            materials: [ 'cube.mtl' ],
+                            textures: [ 'default.png' ]
+                        },
+                        'lamp': {
+                            meshes: [ 'lamp.obj' ],
+                            materials: [ 'lamp.mtl' ],
+                            textures: [ 'white.png' ]
+                        },
+                        'floor': {
+                            meshes: [ 'floor.obj' ],
+                            materials: [ 'floor.mtl' ],
+                            textures: [ 'white.png' ]
+                        }
+                    }
+                };
+
+                Assets.load( manifest, function() {
+
+                    SHADERS.depth = GLU.initShader( GL,
+                                                    Assets.getShader( 'depth.vs' ),
+                                                    Assets.getShader( 'depth.fs' ) );
+
+                    SHADERS.pointLight = GLU.initShader( GL,
+                                                         Assets.getShader( 'default.vs' ),
+                                                         Assets.getShader( 'point-light.fs' ) );
+
+                    SHADERS.spotLight = GLU.initShader( GL,
+                                                        Assets.getShader( 'default.vs' ),
+                                                        Assets.getShader( 'spot-light.fs' ) );
+
+                    SHADERS.DEBUG_flatColor = GLU.initShader( GL,
+                                                              Assets.getShader( 'flat-color.vs' ),
+                                                              Assets.getShader( 'flat-color.fs' ) );
+
+                    SHADERS.DEBUG_depthGrayscale = GLU.initShader( GL,
+                                                                   Assets.getShader( 'flat-color.vs' ),
+                                                                   Assets.getShader( 'depth-grayscale.fs' ) );
+
+                    shaderError = false;
+                
+                    for ( shader in SHADERS ) {
+                        if ( SHADERS[ shader ] === null ) {
+                            console.log( 'Error initializing shader "' + shader + '".' );
+                            shaderError = true;
+                        }
+                    }
+
+                    if ( ! shaderError ) {
+
+                        // Good to go.
+
+                        GLExtensions.depthTexture = GL.getExtension( 'WEBGL_depth_texture' );
+
+                        if ( ! GLExtensions.depthTexture ) {
+                            console.log( 'Could not fetch "WEBGL_depth_texture" extension.' );
+                        }
+
+                        SCENE = new Scene( [ 0.25, 0.25, 0.25 ] );
+
+
+                        SCENE.addLight( 'spot_1_id',
+                                        'spot',
+                                        {
+                                            position: [ 4.0, 4.0, 3.0 ],
+                                            direction: [ -0.3, -0.4, -0.85 ],
+                                            angle: 30,
+                                            exponent: 50,
+                                            diffuseColor: [ 1.0, 1.0, 1.0 ],
+                                            specularColor: [ 1.0, 1.0, 1.0 ],
+                                            intensity: 10
+                                        } );
+
+                        SCENE.addLight( 'spot_2_id',
+                                        'spot',
+                                        {
+                                            position: [ -3.5, 2.0, 4.0 ],
+                                            direction: [ 0.25, -0.25, -0.85 ],
+                                            angle:30,
+                                            exponent: 100,
+                                            diffuseColor: [ 1.0, 1.0, 1.0 ],
+                                            specularColor: [ 1.0, 1.0, 1.0 ],
+                                            intensity: 5
+                                        } );
+
+                        entities = [];
+
+                        entities.push( Entity.create(
+                            Assets.getModel( 'monkey' ),
+                            Vec3.create( [ 2, 0, -5 ] ),
+                            Vec3.create( [ 0, -0.5, 0 ] ),
+                            0.1 ) );
+
+                        entities.push( Entity.create(
+                            Assets.getModel( 'cube' ),
+                            Vec3.create( [ -2, 0, -4 ] ),
+                            Vec3.create( [ 0, -45 * ( Math.PI / 180 ), 0 ] ),
+                            0.1 ) );
+
+
+
+                        entities.push( Entity.create(
+                            Assets.getModel( 'floor' ),
+                            Vec3.create( [ 0, -1, -4 ] ),
+                            Vec3.create( [ 0, 0, 0 ] ),
+                        0.1 ) );
+
+                        PLAYER = entities[0];
+
+                        CAMERA = {
+                            position: [ 0, 0, 2 ],
+                            rotation: [ 0, 0, 0 ]
+                        };
+
+                        SHADER = null;
+
+                        initBuffers();
+                        initTextures();
+                        initMaterials();
+                        initShadowMaps( SCENE );
+
+                        insetVertexPositions = GL.createBuffer();
+                        insetVertexNormals = GL.createBuffer();
+                        insetTextureCoords = GL.createBuffer();
+
+                        /*
+                         * The clear color will not be changed and culling will
+                         * not be disabled, so set them before the main loop.
+                         */
+
+                        GL.clearColor( 0.0, 0.0, 0.0, 0.0 );
+                        GL.enable( GL.CULL_FACE );
+
+//                        renderScene();
+                        gameLoop();
+
+                    }
+
+                } );
+
+            }
+
+        };
+
+        function gameLoop() {
+
+            window.requestAnimationFrame( gameLoop );
+
+            currentFrameTime = Date.now();
+            delta = ( currentFrameTime - lastFrameTime ) / 1000;
+
+            // Handle input
+            console.time( 'begin input' );
+            handleInput();
+            console.time( 'end input' );
+
+            // Update the game state
+            console.time( 'begin update' );
+            //update();
+            console.time( 'end update' );
+
+            // Render the scene
+            console.time( 'begin render' );
+            renderScene();
+            console.time( 'end render' );
+
+            lastFrameTime = currentFrameTime;
+
+        };
+
+    </script>
+
+</html>

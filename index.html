@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>WebGL</title>
+        <style>
+            body {
+                color: #ddd;
+            }
+        </style>
+    </head>
+    <body onload="start()" style="background-color:rgb(64,64,64);">
+        <canvas id="gl-canvas" width="1024" height="768">
+            Your browser doesn't appear to support the HTML5 <code>&lt;canvas&gt;</code> element.
+        </canvas>
+        <br />
+        Controls:<br />
+        <table>
+            <tr>
+                <td>Up arrow</td>
+                <td>Move camera forward</td>
+            </tr>
+            <tr>
+                <td>Right arrow</td>
+                <td>Turn camera right</td>
+            </tr>
+            <tr>
+                <td>Down arrow</td>
+                <td>Move camera back</td>
+            </tr>
+            <tr>
+                <td>Left arrow</td>
+                <td>Turn camera left</td>
+            </tr>
+            <tr>
+                <td>= (Equals)</td>
+                <td>Move camera up</td>
+            </tr>
+            <tr>
+                <td>' (Single quote)</td>
+                <td>Rotate camera CCW</td>
+            </tr>
+            <tr>
+                <td>; (Semicolon)</td>
+                <td>Rotate camera CW</td>
+            </tr>
+        </table>
+    </body>
+
+    <script src="vec2.js"></script>
+    <script src="vec3.js"></script>
+    <script src="vec4.js"></script>
+    <script src="mat3.js"></script>
+    <script src="mat4.js"></script>
+    <script src="glu.js"></script>
+    <script src="assetmanager.js"></script>
+    <script src="scene.js"></script>
+    <script src="entity.js"></script>
+    <script src="events.js"></script>
+    <script src="input.js"></script>
+    <script src="forward-renderer.js"></script>
+    <script src="deferred-renderer.js"></script>
+    <script>
+
+/*
+
+TO DO:
+1. Add console.time( 'begin render' ) etc. tags to clarify about:tracing output
+2. Look at alternate PCF methods, maybe even VCF for better self-shadowing
+3. Normal mapping
+4. AABBs
+5. Non-visible mesh culling
+6. Physics/collisions
+7. 3rd person camera
+7. Combine SCENE and ENTITIES into one overall container for the simulation
+8. Further encapsulate rendering... pass it some data structure of geometry and lights
+   and let if do it's own thing
+
+*/
+
+        var SHADER_PATH = 'shaders/',
+            ASSET_PATH = 'assets/',
+            
+            ASSETS = new AssetManager(),
+            SCENE = new Scene( [ 0.25, 0.25, 0.25 ] ),
+
+            LEFT_ARROW = 37,
+            UP_ARROW = 38,
+            RIGHT_ARROW = 39,
+            DOWN_ARROW = 40,
+            PLUS = 187,
+            MINUS = 189,
+            OPEN_BRACKET = 219,
+            CLOSE_BRACKET = 221,
+            SEMI_COLON = 186,
+            SINGLE_QUOTE = 222,
+
+            keysDown = {
+                LEFT_ARROW: false,
+                UP_ARROW: false,
+                RIGHT_ARROW: false,
+                DOWN_ARROW: false,
+                PLUS: false,
+                MINUS: false
+            },
+
+            PLAYER = null;
+
+            lastFrameTime = 0,
+            currentFrameTime = 0;
+
+
+        function start() {
+
+            manifest = {
+                shaders: [ 'g-buffer.vs',
+                           'depth.vs',
+                           'flat-color.vs',
+                           'default.vs',
+                           'g-buffer.fs',
+                           'depth.fs',
+                           'depth-grayscale.fs',
+                           'flat-color.fs',
+                           'point-light.fs',
+                           'spot-light.fs' ],
+                programs: {
+                    'gBuffer': [ 'g-buffer.vs', 'g-buffer.fs' ],
+                    'depth': [ 'depth.vs', 'depth.fs' ],
+                    'pointLight': [ 'default.vs', 'point-light.fs' ],
+                    'spotLight': [ 'default.vs', 'spot-light.fs' ],
+                    'DEBUG_flatColor': [ 'flat-color.vs', 'flat-color.fs' ],
+                    'DEBUG_depthGrayscale': [ 'flat-color.vs', 'depth-grayscale.fs' ]
+                },
+                models: {
+                    'monkey': {
+                        meshes: [ 'monkey.obj' ],
+                        materials: [ 'monkey.mtl' ],
+                        textures: [ 'default.png' ]
+                    },
+                    'cone': {
+                        meshes: [ 'cone.obj' ],
+                        materials: [ 'cone.mtl' ],
+                        textures: [ 'default.png' ]
+                    },
+                    'cube': {
+                        meshes: [ 'cube.obj' ],
+                        materials: [ 'cube.mtl' ],
+                        textures: [ 'default.png' ]
+                    },
+                    'lamp': {
+                        meshes: [ 'lamp.obj' ],
+                        materials: [ 'lamp.mtl' ],
+                        textures: [ 'white.png' ]
+                    },
+                    'floor': {
+                        meshes: [ 'floor.obj' ],
+                        materials: [ 'floor.mtl' ],
+                        textures: [ 'checkerboard.jpg' ]
+                    }
+                }
+            };
+
+            ASSETS.load( manifest, function() {
+
+                SCENE.addLight( 'spot_1_id',
+                                'spot',
+                                {
+                                    position: [ 4.0, 4.0, 3.0 ],
+                                    direction: [ -0.3, -0.4, -0.85 ],
+                                    angle: 30,
+                                    exponent: 50,
+                                    diffuseColor: [ 1.0, 1.0, 1.0 ],
+                                    specularColor: [ 1.0, 1.0, 1.0 ],
+                                    intensity: 10
+                                } );
+
+                SCENE.addLight( 'spot_2_id',
+                                'spot',
+                                {
+                                    position: [ -3.5, 2.0, 4.0 ],
+                                    direction: [ 0.25, -0.25, -0.85 ],
+                                    angle:30,
+                                    exponent: 100,
+                                    diffuseColor: [ 1.0, 1.0, 1.0 ],
+                                    specularColor: [ 1.0, 1.0, 1.0 ],
+                                    intensity: 5
+                                } );
+
+                entities = [];
+
+                entities.push( Entity.create(
+                    ASSETS.getModel( 'monkey' ),
+                    Vec3.create( [ 2, 0, -5 ] ),
+                    Vec3.create( [ 0, -0.5, 0 ] ),
+                    0.1 ) );
+
+                entities.push( Entity.create(
+                    ASSETS.getModel( 'cube' ),
+                    Vec3.create( [ -2, 0, -4 ] ),
+                    Vec3.create( [ 0, -45 * ( Math.PI / 180 ), 0 ] ),
+                    0.1 ) );
+
+                entities.push( Entity.create(
+                    ASSETS.getModel( 'floor' ),
+                    Vec3.create( [ 0, -1, -4 ] ),
+                    Vec3.create( [ 0, 0, 0 ] ),
+                0.1 ) );
+
+                PLAYER = entities[0];
+
+                CAMERA = {
+                    position: [ 0, 0, 2 ],
+                    rotation: [ 0, 0, 0 ]
+                };
+
+
+                R = new ForwardRenderer( 'gl-canvas', ASSETS, SCENE );
+
+                console.log( ASSETS, SCENE, entities );
+
+                R.renderScene( SCENE, entities );
+                gameLoop();
+
+            } );
+
+        };
+
+        function gameLoop() {
+
+            window.requestAnimationFrame( gameLoop );
+
+            currentFrameTime = Date.now();
+            delta = ( currentFrameTime - lastFrameTime ) / 1000;
+
+            // Handle input
+            handleInput();
+
+            // Update the game state
+            // update();
+
+            // Render the scene
+            R.renderScene( SCENE, entities );
+
+            lastFrameTime = currentFrameTime;
+
+        };
+
+    </script>
+
+</html>
